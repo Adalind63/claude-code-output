@@ -1,0 +1,45 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Java
+*.class
+*.jar
+target/
+
+# Build
+dist/
+build/
+*.exe
+*.dll
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Temp
+tmp/
+temp/
+*.tmp
