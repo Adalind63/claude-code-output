@@ -1,0 +1,11 @@
+# 欧盟理事会 (consilium.europa.eu) 英文语料爬虫 - 依赖清单
+# 安装命令: pip install -r requirements.txt
+
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+pandas>=1.5.0
+lxml>=4.9.0
+DrissionPage>=4.0.0
+
+# 可选依赖（如果 DrissionPage 不可用时的备选方案）:
+# curl_cffi>=0.6.0
