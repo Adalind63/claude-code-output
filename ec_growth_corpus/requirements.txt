@@ -1,0 +1,21 @@
+# EC GROWTH China Corpus Crawler — Dependencies
+# POLIANNA Methodology (PMC, 2026)
+
+# Core
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# SPARQL
+rdflib>=7.0.0
+SPARQLWrapper>=2.0.0
+
+# PDF Text Extraction
+pdfplumber>=0.10.0
+PyPDF2>=3.0.0
+
+# Progress
+tqdm>=4.66.0
+
+# Optional: faster XML parsing
+# defusedxml>=0.7.0

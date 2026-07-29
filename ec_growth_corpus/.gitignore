@@ -1,0 +1,6 @@
+txt/
+csv/
+logs/
+progress.json
+__pycache__/
+*.pyc
