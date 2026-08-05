@@ -1,278 +1,204 @@
 # -*- coding: utf-8 -*-
 r"""
 欧盟对华贸易英文语料合并预处理脚本
-功能：递归遍历 D:\项目流程\ 下所有 CSV，标准化列名 -> 去重 -> 按年份排序 -> 输出总文件
+功能：遍历 D:\项目流程\txt汇总\ 下所有 .txt，解析元数据 -> 去重 -> 按年份排序 -> 输出总 CSV
 适配：BERT 批评性话语分析（CDA）建模
 """
 
 import pandas as pd
 import os
 import glob
+import re
 
 # ============================================================
 # 1. 路径配置
 # ============================================================
-INPUT_DIR = r"D:\项目流程"
+TXT_DIR = r"D:\项目流程\txt汇总"
 OUTPUT_PATH = r"D:\项目流程\all_corpus_total.csv"
-
-# ============================================================
-# 2. 列名标准化映射表（原始列名 -> 统一字段）
-#    覆盖所有已发现的 CSV 列名变体
-# ============================================================
-COLUMN_MAP = {
-    # ---- 正文列 ----
-    "完整正文": "text",
-    "完整正文文本": "text",
-    "全文": "text",
-    "全文 (Full Text)": "text",
-    "正文": "text",
-    "内容": "text",
-    "全文内容": "text",
-    "sentence": "text",
-    "text": "text",
-    "content": "text",
-    "body": "text",
-    "article": "text",
-    # ---- 年份列 ----
-    "年份": "year",
-    "年份 (Year)": "year",
-    "发布年份": "year",
-    "年": "year",
-    "year": "year",
-    "date": "year",
-    "pub_year": "year",
-    # ---- 来源列 ----
-    "发布机构": "source",
-    "发布机构_EN (Institution EN)": "source",
-    "发布机构_ZH (Institution ZH)": "source",
-    "来源": "source",
-    "机构": "source",
-    "source": "source",
-    "publisher": "source",
-    "org": "source",
-    "organization": "source",
-    "website": "source",
-    # ---- 议题列 ----
-    "议题领域": "theme",
-    "主题_EN (Topic EN)": "theme",
-    "主题_ZH (Topic ZH)": "theme",
-    "议题": "theme",
-    "领域": "theme",
-    "主题": "theme",
-    "theme": "theme",
-    "topic": "theme",
-    "subject": "theme",
-    "category": "theme",
-}
 
 # 四个建模核心字段
 CORE_FIELDS = ["text", "year", "source", "theme"]
 
-# 排除的非语料文件名（日志/元数据/备份/质检结果）
-EXCLUDE_NAMES = {
-    "clean_log.csv",
-    "metadata.csv",
-    "search_results.csv",
-    "abnormal_document_list.csv",
-    "invalid_document.csv",
-    "missing_celex.csv",
-    "other_topic_review.csv",
-    "xml_structure_check.csv",
-    "all_corpus_total.csv",
-}
 
-
-def is_excluded(file_path: str) -> bool:
-    """根据文件名或路径特征排除非语料文件。"""
-    name = os.path.basename(file_path)
-    if name in EXCLUDE_NAMES:
-        return True
-    # 排除备份文件
-    if "backup" in name.lower():
-        return True
-    # 排除 _ds_store 等系统文件
-    if name.startswith(".") or name.startswith("~"):
-        return True
-    return False
-
-
-def standardize_columns(df: pd.DataFrame, file_name: str):
+# ============================================================
+# 2. txt 文件解析函数（兼容两种格式）
+# ============================================================
+def extract_year_from_filename(filename: str) -> str:
     """
-    将 DataFrame 列名按 COLUMN_MAP 映射到统一字段。
-    同一统一字段出现多次时，取第一个非空值合并。
-    返回标准化后的 DataFrame，若无法匹配则返回 None。
+    从文件名提取合理年份（2010-2030 范围），滑动窗口扫描避免 CELEX 编号误判。
+    例: 32023R2120_full_text.txt -> 2023（非 3202，滑动窗口覆盖重叠部分）
+         01997R0088-20200918.txt  -> 2020
     """
-    # 去除列名首尾空格及不可见字符
-    df.columns = [str(c).strip() for c in df.columns]
+    # 滑动窗口：逐位检查每 4 个连续字符
+    for i in range(len(filename) - 3):
+        chunk = filename[i:i + 4]
+        if chunk.isdigit():
+            y = int(chunk)
+            if 2017 <= y <= 2026:
+                return str(y)
+    # 无 2017-2026 范围内的年份，返回空字符串
+    return ''
 
-    # 当前文件能匹配的 原始列名 -> 统一字段
-    file_map = {}
-    for col in df.columns:
-        if col in COLUMN_MAP:
-            file_map[col] = COLUMN_MAP[col]
 
-    if not file_map:
-        print(f"  [警告] {file_name} 列名无法匹配映射表，跳过。")
-        print(f"         实际列名: {list(df.columns)}")
+def parse_txt_file(filepath: str) -> dict | None:
+    """
+    解析单个 txt 文件，提取 text / year / source / theme。
+
+    格式 A（标准，2654 个）：元数据头 + 分隔线 + 正文
+      Title: ...
+      Source: ...
+      Topic (EN): ...
+      Year: ...
+      ======================================================================
+      [正文]
+
+    格式 B（full_text，221 个）：直接以正文开头，无元数据头
+      从文件名推断年份（如 32023R2120_full_text.txt -> 2023）
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception:
         return None
 
-    # 重命名
-    df = df.rename(columns=file_map)
+    basename = os.path.basename(filepath)
 
-    # 处理合并后可能出现的重复统一字段（同名列）
-    for field in CORE_FIELDS:
-        cols = [c for c in df.columns if c == field]
-        if len(cols) > 1:
-            first_col = cols[0]
-            for dup_col in cols[1:]:
-                df[first_col] = df[first_col].fillna(df[dup_col])
-            df = df.drop(columns=cols[1:])
+    # ---- 尝试匹配 ===== 分隔线 ----
+    # 兼容行首无换行（分隔线在文件第一行的情况）
+    sep_match = re.search(r'(?:^|\n)={30,}\s*\n', content)
 
-    return df
+    if sep_match:
+        # ========== 格式 A：标准结构 ==========
+        header = content[:sep_match.start()].strip()
+        body = content[sep_match.end():].strip()
 
+        if not body:
+            return None
 
-def main():
-    # ============================================================
-    # 3. 递归遍历所有子目录下的 CSV 文件
-    # ============================================================
-    csv_files = glob.glob(os.path.join(INPUT_DIR, "**", "*.csv"), recursive=True)
-    print(f"递归搜索发现 {len(csv_files)} 个 CSV 文件")
+        # 解析头部字段（格式：Key: Value）
+        meta = {}
+        for line in header.split('\n'):
+            line = line.strip()
+            if ':' in line:
+                key, value = line.split(':', 1)
+                meta[key.strip()] = value.strip()
 
-    # 过滤非语料文件
-    corpus_files = [f for f in csv_files if not is_excluded(f)]
-    excluded = len(csv_files) - len(corpus_files)
-    if excluded > 0:
-        print(f"排除 {excluded} 个非语料文件（日志/元数据/备份）\n")
+        # 字段映射：Source -> source, Topic (EN) -> theme, Year -> year
+        source = meta.get('Source', '')
+        theme = meta.get('Topic (EN)', '')
+        year = meta.get('Year', '')
+
+        # 补漏：如果头部缺 Year，从文件名推断（如 01997R0088-20200918.txt）
+        if not year:
+            year = extract_year_from_filename(basename)
+
     else:
-        print("")
+        # ========== 格式 B：full_text，无元数据头 ==========
+        body = content.strip()
+        if not body:
+            return None
 
-    if not corpus_files:
-        print("未发现语料 CSV 文件，脚本终止。")
+        source = ''
+        theme = ''
+        year = extract_year_from_filename(basename)
+
+    return {
+        'text': body,
+        'year': year,
+        'source': source,
+        'theme': theme,
+    }
+
+
+# ============================================================
+# 3. 主流程
+# ============================================================
+def main():
+    # ---- 3.1 遍历所有 txt 文件 ----
+    txt_files = glob.glob(os.path.join(TXT_DIR, "*.txt"))
+    print(f"在 {TXT_DIR} 下发现 {len(txt_files)} 个 txt 文件\n")
+
+    if not txt_files:
+        print("未发现任何 txt 文件，脚本终止。")
         return
 
-    print(f"待处理语料文件 {len(corpus_files)} 个：")
-    for f in corpus_files:
-        print(f"  - {os.path.relpath(f, INPUT_DIR)}")
-    print("")
+    # ---- 3.2 逐个解析，收集记录 ----
+    records = []
+    ok_standard = 0    # 标准格式，有完整元数据
+    ok_fulltext = 0    # full_text 格式，无元数据
+    skipped = 0        # 解析失败或正文为空
 
-    # ============================================================
-    # 4. 逐个读取并标准化列名
-    # ============================================================
-    dfs = []
-    skipped = 0
-    total_rows_in = 0
+    for i, filepath in enumerate(txt_files):
+        if (i + 1) % 500 == 0:
+            print(f"  解析进度: {i+1:,} / {len(txt_files):,}")
 
-    for file_path in corpus_files:
-        rel_path = os.path.relpath(file_path, INPUT_DIR)
-        print(f"处理: {rel_path}")
-
-        # 多编码尝试读取
-        df = None
-        for enc in ["utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"]:
-            try:
-                df = pd.read_csv(file_path, encoding=enc)
-                print(f"  编码: {enc}, 行数: {len(df):,}, 列数: {len(df.columns)}")
-                break
-            except (UnicodeDecodeError, UnicodeError):
-                continue
-            except Exception as e:
-                print(f"  读取异常 ({enc}): {e}")
-                continue
-
-        if df is None or len(df) == 0:
-            print(f"  [跳过] 无法读取或文件为空")
+        record = parse_txt_file(filepath)
+        if record is None or not record['text'].strip():
             skipped += 1
             continue
 
-        # 列名标准化
-        df = standardize_columns(df, rel_path)
-        if df is None:
-            skipped += 1
-            continue
+        records.append(record)
+        if record['source']:
+            ok_standard += 1
+        else:
+            ok_fulltext += 1
 
-        # ============================================================
-        # 5. 只保留四个核心字段，缺失的补空字符串
-        # ============================================================
-        for field in CORE_FIELDS:
-            if field not in df.columns:
-                df[field] = ""
+    print(f"解析完成: 标准格式 {ok_standard:,} / full_text {ok_fulltext:,} / 跳过 {skipped}\n")
 
-        df = df[CORE_FIELDS].copy()
-
-        # NaN -> 空字符串，去首尾空格
-        for field in CORE_FIELDS:
-            df[field] = df[field].fillna("").astype(str).str.strip()
-
-        # 剔除 text 为空的行
-        before = len(df)
-        df = df[df["text"] != ""]
-        empty_dropped = before - len(df)
-        if empty_dropped > 0:
-            print(f"  剔除 text 为空: {empty_dropped} 行")
-
-        if len(df) == 0:
-            print(f"  [跳过] 处理后无有效数据")
-            skipped += 1
-            continue
-
-        total_rows_in += len(df)
-        dfs.append(df)
-        print(f"  OK 有效行数: {len(df):,}")
-
-    if not dfs:
-        print(f"\n所有文件均无效，已跳过 {skipped} 个，无数据可合并。")
+    if not records:
+        print("无有效数据，退出。")
         return
 
-    print(f"\n{'='*60}")
-    print(f"共读取 {len(dfs)} 个文件，跳过了 {skipped} 个")
+    # ---- 3.3 构建 DataFrame ----
+    df = pd.DataFrame(records, columns=CORE_FIELDS)
 
-    # ============================================================
-    # 6. pd.concat 纵向合并所有表格，重置索引
-    # ============================================================
-    merged = pd.concat(dfs, axis=0, ignore_index=True)
-    print(f"合并后总行数（去重前）: {len(merged):,}")
+    # 所有字段填充：NaN -> 空字符串，去首尾空格
+    for field in CORE_FIELDS:
+        df[field] = df[field].fillna("").astype(str).str.strip()
 
-    # ============================================================
-    # 7. 按 text 字段去重，剔除重复政策文档
-    # ============================================================
-    before_dedup = len(merged)
-    merged = merged.drop_duplicates(subset=["text"], keep="first")
-    dedup_removed = before_dedup - len(merged)
-    print(f"去重后总行数: {len(merged):,} （剔除 {dedup_removed:,} 条重复，{dedup_removed/before_dedup*100:.1f}%）")
+    # 剔除 text 为空的行（最后一道保险）
+    before = len(df)
+    df = df[df["text"] != ""]
+    if len(df) < before:
+        print(f"剔除 text 为空: {before - len(df)} 行")
 
-    # ============================================================
-    # 8. 按 year 升序排序，年份未知的沉底
-    # ============================================================
-    merged["_year_num"] = pd.to_numeric(merged["year"], errors="coerce")
-    merged = merged.sort_values(by="_year_num", ascending=True, na_position="last")
-    merged = merged.drop(columns=["_year_num"])
-    merged = merged.reset_index(drop=True)
+    print(f"合并后总行数（去重前）: {len(df):,}")
 
-    # ============================================================
-    # 9. 输出总文件
-    # ============================================================
-    merged.to_csv(OUTPUT_PATH, encoding="utf-8-sig", index=False)
-    print(f"\n{'='*60}")
+    # ---- 3.4 按 text 字段去重 ----
+    before_dedup = len(df)
+    df = df.drop_duplicates(subset=["text"], keep="first")
+    removed = before_dedup - len(df)
+    print(f"去重后总行数: {len(df):,}（剔除 {removed:,} 条重复，{removed / before_dedup * 100:.1f}%）")
+
+    # ---- 3.5 按 year 升序排序，年份未知沉底 ----
+    df["_year_num"] = pd.to_numeric(df["year"], errors="coerce")
+    df = df.sort_values(by="_year_num", ascending=True, na_position="last")
+    df = df.drop(columns=["_year_num"])
+    df = df.reset_index(drop=True)
+
+    # ---- 3.6 输出 ----
+    df.to_csv(OUTPUT_PATH, encoding="utf-8-sig", index=False)
+
+    # ---- 3.7 汇总报告 ----
+    valid_year = df.loc[df["year"] != "", "year"]
+    valid_source = df.loc[df["source"] != "", "source"]
+    valid_theme = df.loc[df["theme"] != "", "theme"]
+
+    print(f"\n{'=' * 60}")
     print(f"输出文件: {OUTPUT_PATH}")
-    print(f"总行数: {len(merged):,}")
+    print(f"总行数: {len(df):,}")
     print(f"字段: {CORE_FIELDS}")
-
-    # 统计摘要
-    valid_year = merged.loc[merged["year"] != "", "year"]
     if len(valid_year) > 0:
         print(f"年份范围: {valid_year.min()} ~ {valid_year.max()}")
-    valid_source = merged.loc[merged["source"] != "", "source"]
-    print(f"有来源信息的行: {len(valid_source):,} / {len(merged):,}")
-    print(f"唯一来源数: {valid_source.nunique()}")
-    valid_theme = merged.loc[merged["theme"] != "", "theme"]
-    print(f"有议题标签的行: {len(valid_theme):,} / {len(merged):,}")
+    print(f"有来源信息: {len(valid_source):,} / {len(df):,}（{len(valid_source)/len(df)*100:.1f}%）")
+    print(f"有议题标签: {len(valid_theme):,} / {len(df):,}（{len(valid_theme)/len(df)*100:.1f}%）")
 
-    # 每年行数分布
+    # 年份分布
     print(f"\n年份分布:")
-    year_counts = merged["year"].replace("", "未知").value_counts().sort_index()
+    year_counts = df["year"].replace("", "未知").value_counts().sort_index()
     for y, c in year_counts.items():
         bar = "#" * max(1, c // max(1, year_counts.max() // 40))
-        print(f"  {y:>6s}: {c:>8,}  {bar}")
+        print(f"  {y:>6s}: {c:>6,}  {bar}")
 
     print(f"\n全部完成。")
 
